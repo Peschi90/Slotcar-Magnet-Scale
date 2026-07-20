@@ -6,6 +6,7 @@
 #include <ESP8266mDNS.h>
 #include <HX711.h>
 #include <WiFiClientSecure.h>
+#include <Updater.h>
 #include "version.h"
 
 #include <math.h>
@@ -141,6 +142,11 @@ bool wifiConfigured = false;
 bool stationConnected = false;
 uint32_t lastWifiRetryMs = 0;
 bool mdnsActive = false;
+bool otaUploadRejected = false;
+bool otaUploadHeaderChecked = false;
+size_t otaUploadMaxSize = 0;
+size_t otaUploadWritten = 0;
+String otaUploadError;
 
 void handleCalibrationPage();
 
@@ -1446,6 +1452,12 @@ void handleApiVersion() {
   sendJson(200, json);
 }
 
+void handleApiOtaInfo() {
+  const size_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+  sendJson(200, "{\"ok\":true,\"maxUploadBytes\":" + String(static_cast<unsigned long>(maxSketch)) +
+                   ",\"requiredMagic\":\"0xE9\"}");
+}
+
 void handleApiOtaFlash() {
   if (!stationConnected) {
     sendJson(400, "{\"ok\":false,\"error\":\"Kein WLAN verbunden\"}");
@@ -1474,6 +1486,81 @@ void handleApiOtaFlash() {
       ESPhttpUpdate.getLastError(),
       ESPhttpUpdate.getLastErrorString().c_str());
   }
+}
+
+void handleApiOtaUpload() {
+  HTTPUpload &upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    otaUploadRejected = false;
+    otaUploadHeaderChecked = false;
+    otaUploadError = "";
+    otaUploadWritten = 0;
+    otaUploadMaxSize = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+
+    if (upload.totalSize > 0 && upload.totalSize > otaUploadMaxSize) {
+      otaUploadRejected = true;
+      otaUploadError = "Firmware-Datei ist zu gross fuer den verfuegbaren Speicher.";
+      Serial.println(F("FEHLER OTA Upload: Datei zu gross."));
+      return;
+    }
+
+    if (!Update.begin(otaUploadMaxSize)) {
+      otaUploadRejected = true;
+      otaUploadError = "Update-Initialisierung fehlgeschlagen.";
+      Update.printError(Serial);
+      return;
+    }
+    Serial.printf("OTA Upload Start: %s\n", upload.filename.c_str());
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (otaUploadRejected) {
+      return;
+    }
+
+    if (!otaUploadHeaderChecked && upload.currentSize > 0) {
+      otaUploadHeaderChecked = true;
+      if (upload.buf[0] != 0xE9) {
+        otaUploadRejected = true;
+        otaUploadError = "Ungueltiger Firmware-Header (erwartet 0xE9).";
+        Update.end();
+        Serial.println(F("FEHLER OTA Upload: Ungueltiger Header."));
+        return;
+      }
+    }
+
+    otaUploadWritten += upload.currentSize;
+    if (otaUploadWritten > otaUploadMaxSize) {
+      otaUploadRejected = true;
+      otaUploadError = "Firmware-Datei ueberschreitet den maximalen Upload-Speicher.";
+      Update.end();
+      Serial.println(F("FEHLER OTA Upload: Schreibgroesse ueberschritten."));
+      return;
+    }
+
+    const size_t written = Update.write(upload.buf, upload.currentSize);
+    if (written != upload.currentSize) {
+      otaUploadRejected = true;
+      otaUploadError = "Fehler beim Schreiben der Firmware-Daten.";
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (otaUploadRejected) {
+      return;
+    }
+    if (Update.end(true)) {
+      Serial.printf("OTA Upload Erfolg: %u bytes\n", upload.totalSize);
+    } else {
+      otaUploadRejected = true;
+      otaUploadError = "Firmware konnte nicht abgeschlossen werden.";
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    otaUploadRejected = true;
+    otaUploadError = "Upload wurde abgebrochen.";
+    Update.end();
+    Serial.println(F("OTA Upload abgebrochen"));
+  }
+  yield();
 }
 
 static const uint8_t FAVICON_PNG[] PROGMEM = {
@@ -2040,6 +2127,14 @@ void handleRootPage() {
             <button id="flashBtn" onclick="doOtaFlash()">Jetzt flashen</button>
           </div>
         </div>
+        <div class="card" style="margin-top:10px">
+          <h2>Manuelles Firmware-Update (.bin)</h2>
+          <div class="row">
+            <input id="manualFirmwareFile" type="file" accept=".bin,application/octet-stream" />
+            <button class="alt" id="manualUploadBtn" onclick="doManualOtaUpload()">Datei hochladen & flashen</button>
+          </div>
+          <div class="muted" style="margin-top:8px">Nur passende ESP8266 Firmware-BIN hochladen.</div>
+        </div>
       </section>
 
       <pre id="log"></pre>
@@ -2072,6 +2167,7 @@ let lastMeasurement = null;
 let reconnectWatcherTimer = null;
 let reconnectDeadlineMs = 0;
 let reconnectReason = '';
+let otaMaxUploadBytes = 0;
 
 const log = (m) => {
   const el = q('#log');
@@ -3007,7 +3103,26 @@ async function checkUpdate() {
       return;
     }
     _otaFlashUrl = asset.browser_download_url;
-    if (latest === cur) {
+
+    const parseVersionParts = (v) => {
+      const m = String(v || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/i);
+      if (!m) return null;
+      return [Number(m[1]), Number(m[2]), Number(m[3])];
+    };
+    const compareSemver = (a, b) => {
+      const va = parseVersionParts(a);
+      const vb = parseVersionParts(b);
+      if (!va || !vb) {
+        return String(a) === String(b) ? 0 : (String(a) > String(b) ? 1 : -1);
+      }
+      for (let i = 0; i < 3; i++) {
+        if (va[i] > vb[i]) return 1;
+        if (va[i] < vb[i]) return -1;
+      }
+      return 0;
+    };
+
+    if (compareSemver(latest, cur) <= 0) {
       txt.textContent = 'Firmware ist aktuell (' + cur + ').';
       actions.style.display = 'none';
     } else {
@@ -3044,6 +3159,68 @@ async function doOtaFlash() {
   }
 }
 
+async function doManualOtaUpload() {
+  const fileInput = q('#manualFirmwareFile');
+  const btn = q('#manualUploadBtn');
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    log('Bitte zuerst eine .bin Datei auswaehlen.');
+    return;
+  }
+
+  const file = fileInput.files[0];
+  if (!String(file.name || '').toLowerCase().endsWith('.bin')) {
+    if (!confirm('Datei endet nicht auf .bin. Trotzdem hochladen?')) {
+      return;
+    }
+  }
+
+  if (!otaMaxUploadBytes) {
+    try {
+      const info = await api('/api/ota/info');
+      otaMaxUploadBytes = Number(info.maxUploadBytes || 0);
+    } catch (e) {
+      log('OTA-Info nicht verfuegbar: ' + e.message);
+    }
+  }
+
+  if (otaMaxUploadBytes > 0 && file.size > otaMaxUploadBytes) {
+    log(`Datei zu gross: ${(file.size / 1024).toFixed(1)} KiB > ${(otaMaxUploadBytes / 1024).toFixed(1)} KiB`);
+    return;
+  }
+
+  if (!confirm(`Firmware ${file.name} jetzt hochladen und flashen?`)) {
+    return;
+  }
+
+  btn.disabled = true;
+  beginReconnectWatch('Manuelles OTA Update');
+  log(`Manueller OTA Upload gestartet: ${file.name}`);
+
+  try {
+    const form = new FormData();
+    form.append('firmware', file);
+    const resp = await fetch('/api/ota/upload', {
+      method: 'POST',
+      body: form
+    });
+    const txt = await resp.text();
+    let data = null;
+    try {
+      data = JSON.parse(txt);
+    } catch (_) {
+    }
+
+    if (!resp.ok || !data || !data.ok) {
+      throw new Error((data && data.error) ? data.error : `HTTP ${resp.status}`);
+    }
+
+    log('Upload abgeschlossen. Geraet startet neu...');
+  } catch (e) {
+    log('Manueller OTA Fehler: ' + e.message);
+    btn.disabled = false;
+  }
+}
+
 window.addEventListener('hashchange', applyHashTab);
 applyHashTab();
 loadAlertConfig();
@@ -3056,6 +3233,12 @@ q('#vehicleFilter').addEventListener('input', renderVehicleMeasurements);
 q('#vehicleImportFile').addEventListener('change', handleVehicleImportJson);
 refreshAll();
 scanWifi();
+api('/api/ota/info').then(info => {
+  otaMaxUploadBytes = Number(info.maxUploadBytes || 0);
+  if (otaMaxUploadBytes > 0) {
+    log(`OTA Upload-Limit: ${(otaMaxUploadBytes / 1024).toFixed(1)} KiB`);
+  }
+}).catch(() => {});
 api('/api/version').then(v => {
   document.getElementById('fwCurrent').textContent = 'Installiert: ' + (v.version || 'unbekannt');
 }).catch(() => {});
@@ -3099,7 +3282,25 @@ void setupWebServer() {
   server.on("/api/reset", HTTP_GET, handleApiReset);
   server.on("/api/reboot", HTTP_GET, handleApiReboot);
   server.on("/api/version", HTTP_GET, handleApiVersion);
+  server.on("/api/ota/info", HTTP_GET, handleApiOtaInfo);
   server.on("/api/ota/flash", HTTP_GET, handleApiOtaFlash);
+  server.on("/api/ota/upload", HTTP_POST,
+    []() {
+      const bool ok = !Update.hasError() && !otaUploadRejected;
+      server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      if (ok) {
+        server.send(200, "application/json", "{\"ok\":true,\"message\":\"Upload erfolgreich, Neustart\"}");
+        delay(120);
+        ESP.restart();
+      } else {
+        String err = otaUploadError;
+        if (err.length() == 0) {
+          err = "OTA Upload fehlgeschlagen";
+        }
+        server.send(500, "application/json", "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}");
+      }
+    },
+    handleApiOtaUpload);
   server.onNotFound([]() { sendJson(404, "{\"ok\":false,\"error\":\"Not found\"}"); });
   server.begin();
   Serial.println(F("OK: Webserver gestartet."));
