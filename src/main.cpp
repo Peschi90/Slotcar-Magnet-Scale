@@ -1432,6 +1432,13 @@ void handleApiReset() {
   sendJson(200, "{\"ok\":true}");
 }
 
+void handleApiReboot() {
+  sendJson(200, "{\"ok\":true,\"message\":\"Neustart wird ausgefuehrt\"}");
+  server.client().flush();
+  delay(120);
+  ESP.restart();
+}
+
 void handleApiVersion() {
   String json = "{\"ok\":true,\"version\":\"";
   json += jsonEscape(String(FIRMWARE_VERSION));
@@ -2004,7 +2011,8 @@ void handleRootPage() {
         <h2>System</h2>
         <div class="row">
           <button class="alt" onclick="refreshAll()">STATUS aktualisieren</button>
-          <button class="danger" onclick="doReset()">RESET</button>
+          <button class="danger" onclick="doReboot()">NEUSTART</button>
+          <button class="alt" onclick="doResetCalibration()">Kalibrier/Tara RESET</button>
         </div>
         <div id="reconnectStatus" class="pill" style="display:none;margin-top:8px"></div>
         <pre id="statusDump"></pre>
@@ -2854,12 +2862,22 @@ async function stopStream() {
   }
 }
 
-async function doReset() {
+async function doResetCalibration() {
+  try {
+    await api('/api/reset');
+    log('Kalibrier/Tara Reset ausgefuehrt');
+    await refreshAll();
+  } catch (e) {
+    log(e.message);
+  }
+}
+
+async function doReboot() {
+  if (!confirm('Geraet jetzt neu starten?')) return;
   try {
     beginReconnectWatch('Neustart');
-    await api('/api/reset');
-    log('Reset ausgefuehrt');
-    await refreshAll();
+    await api('/api/reboot');
+    log('Neustart ausgeloest.');
   } catch (e) {
     log(e.message);
   }
@@ -3079,6 +3097,7 @@ void setupWebServer() {
   server.on("/api/wifi/clear", HTTP_GET, handleApiWifiClear);
   server.on("/api/wifi/scan", HTTP_GET, handleApiWifiScan);
   server.on("/api/reset", HTTP_GET, handleApiReset);
+  server.on("/api/reboot", HTTP_GET, handleApiReboot);
   server.on("/api/version", HTTP_GET, handleApiVersion);
   server.on("/api/ota/flash", HTTP_GET, handleApiOtaFlash);
   server.onNotFound([]() { sendJson(404, "{\"ok\":false,\"error\":\"Not found\"}"); });
