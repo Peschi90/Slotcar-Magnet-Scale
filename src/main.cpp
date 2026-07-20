@@ -1663,9 +1663,16 @@ void handleRootPage() {
     h2 { margin: 0 0 8px; color: var(--accent); font-size: 1.05rem; }
     .muted { font-size: .9rem; color: var(--muted); }
     .big { font-size: 2rem; font-weight: 800; color: #f5ffe4; }
+    .weight-ok { color: #f5ffe4; }
+    .weight-warn { color: #ffd65a; text-shadow: 0 0 10px rgba(255,214,90,.22); }
+    .weight-alarm { color: #ff5f57; text-shadow: 0 0 12px rgba(255,95,87,.35); }
+    .blink { animation: weightBlink .8s step-end infinite; }
+    @keyframes weightBlink {
+      50% { opacity: .35; }
+    }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .stack { display: flex; flex-direction: column; gap: 8px; }
-    input {
+    input, select {
       padding: 8px;
       border: 1px solid rgba(199,255,53,.25);
       border-radius: 8px;
@@ -1801,6 +1808,7 @@ void handleRootPage() {
         <button data-tab="dashboard" class="active">Dashboard</button>
         <button data-tab="measurement">Messung</button>
         <button data-tab="calibration">Kalibrierung</button>
+        <button data-tab="vehicles">Fahrzeuge</button>
         <button data-tab="wifi">WLAN</button>
         <button data-tab="system">System</button>
       </div>
@@ -1817,8 +1825,9 @@ void handleRootPage() {
         <div class="grid">
           <div class="card">
             <div class="muted">Aktuelles Gewicht</div>
-            <div class="big" id="weight">--.- g</div>
+            <div class="big weight-ok" id="weight">--.- g</div>
             <div id="shares" class="muted">LINKS -- % | RECHTS -- %</div>
+            <div id="weightAlert" class="muted" style="margin-top:4px">Bereich: normal</div>
             <div class="row" style="margin-top:8px">
               <button onclick="readNow()">MESSEN</button>
               <button class="alt" onclick="rawNow()">ROH</button>
@@ -1846,6 +1855,47 @@ void handleRootPage() {
           <button class="alt" onclick="stopStream()">STOP Stream</button>
         </div>
         <pre id="measureLog"></pre>
+      </section>
+
+      <section id="tab-vehicles" class="section panel">
+        <h2>Fahrzeug-Messungen</h2>
+        <div class="card">
+          <div class="row">
+            <input id="vehicleName" placeholder="Fahrzeugname (z. B. GT3 #12)" />
+            <input id="vehicleNote" placeholder="Notiz (optional)" />
+            <button onclick="saveVehicleMeasurement()">Aktuelle Messung speichern</button>
+            <button class="danger" onclick="clearVehicleMeasurements()">Liste leeren</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <select id="vehicleSort">
+              <option value="newest">Sortierung: Neueste zuerst</option>
+              <option value="oldest">Sortierung: Aelteste zuerst</option>
+              <option value="weightDesc">Sortierung: Gewicht absteigend</option>
+              <option value="weightAsc">Sortierung: Gewicht aufsteigend</option>
+              <option value="nameAsc">Sortierung: Name A-Z</option>
+            </select>
+            <input id="vehicleFilter" placeholder="Filter (Name/Notiz)" />
+            <button class="alt" onclick="exportVehicleMeasurementsCsv()">CSV Export</button>
+            <button class="alt" onclick="exportVehicleMeasurementsJson()">JSON Export</button>
+            <button class="alt" onclick="triggerVehicleImportJson()">JSON Import</button>
+            <input id="vehicleImportFile" type="file" accept="application/json" style="display:none" />
+          </div>
+          <div class="muted" style="margin-top:8px">Hinweis: Es wird die zuletzt gemessene MESSEN-Ausgabe gespeichert.</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Datum</th>
+                <th>Fahrzeug</th>
+                <th>Gewicht (g)</th>
+                <th>Links %</th>
+                <th>Rechts %</th>
+                <th>Notiz</th>
+                <th>Aktion</th>
+              </tr>
+            </thead>
+            <tbody id="vehicleRows"></tbody>
+          </table>
+        </div>
       </section>
 
       <section id="tab-calibration" class="section panel">
@@ -1905,6 +1955,19 @@ void handleRootPage() {
           <button class="danger" onclick="doReset()">RESET</button>
         </div>
         <pre id="statusDump"></pre>
+        <h2 style="margin-top:12px">Magnet-Filter Grenzwerte</h2>
+        <div class="card">
+          <div class="row">
+            <input id="yellowMin" type="number" step="0.1" value="380" placeholder="Gelb ab (g)" />
+            <input id="yellowMax" type="number" step="0.1" value="420" placeholder="Gelb bis (g)" />
+            <input id="redAbove" type="number" step="0.1" value="420" placeholder="Rot ueber (g)" />
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button onclick="saveAlertConfig()">Grenzwerte speichern</button>
+            <button class="alt" onclick="resetAlertConfigDefaults()">Standardwerte</button>
+          </div>
+          <div class="muted" style="margin-top:8px">Standard: 380-420 g gelb, ueber 420 g rot + blinkend.</div>
+        </div>
         <h2 style="margin-top:12px">Firmware-Update (OTA)</h2>
         <p id="fwCurrent" style="margin:4px 0;color:var(--muted)">Version: …</p>
         <div class="row" style="margin-top:6px">
@@ -1936,9 +1999,15 @@ void handleRootPage() {
 <script>
 const q = s => document.querySelector(s);
 const qa = s => Array.from(document.querySelectorAll(s));
+const STORAGE_ALERT_KEY = 'sms_alert_config_v1';
+const STORAGE_VEHICLES_KEY = 'sms_vehicle_measurements_v1';
+const ALERT_DEFAULTS = { yellowMin: 380, yellowMax: 420, redAbove: 420 };
 let latestStatus = null;
 let wizardRequired = false;
 let wizardRecordedPoints = { LINKS: false, MITTE: false, RECHTS: false };
+let alertConfig = { ...ALERT_DEFAULTS };
+let vehicleMeasurements = [];
+let lastMeasurement = null;
 
 const log = (m) => {
   const el = q('#log');
@@ -1971,8 +2040,323 @@ qa('.menu button').forEach(btn => btn.addEventListener('click', () => setTab(btn
 
 function applyHashTab() {
   const tab = (location.hash || '#dashboard').replace('#', '');
-  const allowed = ['dashboard', 'measurement', 'calibration', 'wifi', 'system'];
+  const allowed = ['dashboard', 'measurement', 'calibration', 'vehicles', 'wifi', 'system'];
   setTab(allowed.includes(tab) ? tab : 'dashboard');
+}
+
+function toFiniteNumber(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function applyAlertConfigToInputs() {
+  q('#yellowMin').value = String(alertConfig.yellowMin);
+  q('#yellowMax').value = String(alertConfig.yellowMax);
+  q('#redAbove').value = String(alertConfig.redAbove);
+}
+
+function loadAlertConfig() {
+  try {
+    const raw = localStorage.getItem(STORAGE_ALERT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      alertConfig = {
+        yellowMin: toFiniteNumber(parsed.yellowMin, ALERT_DEFAULTS.yellowMin),
+        yellowMax: toFiniteNumber(parsed.yellowMax, ALERT_DEFAULTS.yellowMax),
+        redAbove: toFiniteNumber(parsed.redAbove, ALERT_DEFAULTS.redAbove)
+      };
+    }
+  } catch (_) {
+    alertConfig = { ...ALERT_DEFAULTS };
+  }
+  applyAlertConfigToInputs();
+}
+
+function saveAlertConfig() {
+  const yellowMin = toFiniteNumber(q('#yellowMin').value, ALERT_DEFAULTS.yellowMin);
+  const yellowMax = toFiniteNumber(q('#yellowMax').value, ALERT_DEFAULTS.yellowMax);
+  const redAbove = toFiniteNumber(q('#redAbove').value, ALERT_DEFAULTS.redAbove);
+
+  if (yellowMax < yellowMin) {
+    log('Grenzwerte ungueltig: Gelb bis muss groesser/gleich Gelb ab sein.');
+    return;
+  }
+  if (redAbove < yellowMax) {
+    log('Hinweis: Rot-Grenze liegt unter Gelb bis. Das ist erlaubt, aber ungewoehnlich.');
+  }
+
+  alertConfig = { yellowMin, yellowMax, redAbove };
+  localStorage.setItem(STORAGE_ALERT_KEY, JSON.stringify(alertConfig));
+  applyAlertConfigToInputs();
+  if (lastMeasurement) {
+    updateWeightDisplay(lastMeasurement);
+  }
+  log(`Grenzwerte gespeichert: Gelb ${yellowMin}-${yellowMax} g, Rot > ${redAbove} g`);
+}
+
+function resetAlertConfigDefaults() {
+  alertConfig = { ...ALERT_DEFAULTS };
+  localStorage.setItem(STORAGE_ALERT_KEY, JSON.stringify(alertConfig));
+  applyAlertConfigToInputs();
+  if (lastMeasurement) {
+    updateWeightDisplay(lastMeasurement);
+  }
+  log('Grenzwerte auf Standard zurueckgesetzt.');
+}
+
+function classifyWeight(weight) {
+  if (weight > alertConfig.redAbove) {
+    return { level: 'red', text: 'ALARM: moeglicher Tuningmagnet' };
+  }
+  if (weight >= alertConfig.yellowMin && weight <= alertConfig.yellowMax) {
+    return { level: 'yellow', text: 'Toleranzbereich' };
+  }
+  return { level: 'normal', text: 'Bereich: normal' };
+}
+
+function applyWeightState(weight) {
+  const weightEl = q('#weight');
+  const alertEl = q('#weightAlert');
+  weightEl.classList.remove('weight-ok', 'weight-warn', 'weight-alarm', 'blink');
+
+  const state = classifyWeight(weight);
+  if (state.level === 'red') {
+    weightEl.classList.add('weight-alarm', 'blink');
+  } else if (state.level === 'yellow') {
+    weightEl.classList.add('weight-warn');
+  } else {
+    weightEl.classList.add('weight-ok');
+  }
+  alertEl.textContent = state.text;
+}
+
+function loadVehicleMeasurements() {
+  try {
+    const raw = localStorage.getItem(STORAGE_VEHICLES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        vehicleMeasurements = parsed;
+      }
+    }
+  } catch (_) {
+    vehicleMeasurements = [];
+  }
+}
+
+function persistVehicleMeasurements() {
+  localStorage.setItem(STORAGE_VEHICLES_KEY, JSON.stringify(vehicleMeasurements));
+}
+
+function makeVehicleId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeVehicleRecord(item) {
+  const ts = toFiniteNumber(item && item.ts, Date.now());
+  return {
+    id: (item && item.id) ? String(item.id) : makeVehicleId(),
+    ts,
+    name: item && item.name ? String(item.name) : '',
+    note: item && item.note ? String(item.note) : '',
+    weight: toFiniteNumber(item && item.weight, 0),
+    leftPercent: (item && item.leftPercent !== undefined && item.leftPercent !== null) ? Number(item.leftPercent) : undefined,
+    rightPercent: (item && item.rightPercent !== undefined && item.rightPercent !== null) ? Number(item.rightPercent) : undefined
+  };
+}
+
+function getVehicleViewList() {
+  const filterText = (q('#vehicleFilter')?.value || '').trim().toLowerCase();
+  const sortMode = q('#vehicleSort')?.value || 'newest';
+
+  let list = vehicleMeasurements.slice();
+  if (filterText) {
+    list = list.filter(v => {
+      const hay = `${v.name || ''} ${v.note || ''}`.toLowerCase();
+      return hay.includes(filterText);
+    });
+  }
+
+  list.sort((a, b) => {
+    if (sortMode === 'oldest') return a.ts - b.ts;
+    if (sortMode === 'weightDesc') return b.weight - a.weight;
+    if (sortMode === 'weightAsc') return a.weight - b.weight;
+    if (sortMode === 'nameAsc') return (a.name || '').localeCompare((b.name || ''), 'de');
+    return b.ts - a.ts;
+  });
+  return list;
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '');
+  if (s.includes('"') || s.includes(',') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function downloadTextFile(fileName, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportVehicleMeasurementsCsv() {
+  if (!vehicleMeasurements.length) {
+    log('Keine Fahrzeugmessungen zum Exportieren vorhanden.');
+    return;
+  }
+  const rows = [
+    'DatumISO,Fahrzeug,Gewicht_g,LinksProzent,RechtsProzent,Notiz'
+  ];
+  for (const v of getVehicleViewList()) {
+    rows.push([
+      csvEscape(new Date(v.ts).toISOString()),
+      csvEscape(v.name),
+      csvEscape(Number(v.weight).toFixed(2)),
+      csvEscape(v.leftPercent !== undefined ? Number(v.leftPercent).toFixed(1) : ''),
+      csvEscape(v.rightPercent !== undefined ? Number(v.rightPercent).toFixed(1) : ''),
+      csvEscape(v.note)
+    ].join(','));
+  }
+  downloadTextFile('slotcar-fahrzeuge.csv', rows.join('\n'), 'text/csv;charset=utf-8');
+  log('CSV Export erstellt.');
+}
+
+function exportVehicleMeasurementsJson() {
+  if (!vehicleMeasurements.length) {
+    log('Keine Fahrzeugmessungen zum Exportieren vorhanden.');
+    return;
+  }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    vehicles: vehicleMeasurements
+  };
+  downloadTextFile('slotcar-fahrzeuge.json', JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+  log('JSON Export erstellt.');
+}
+
+function triggerVehicleImportJson() {
+  q('#vehicleImportFile').click();
+}
+
+function handleVehicleImportJson(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) {
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result || '{}'));
+      const source = Array.isArray(parsed) ? parsed : parsed.vehicles;
+      if (!Array.isArray(source)) {
+        throw new Error('JSON enthaelt keine gueltige Fahrzeugliste.');
+      }
+
+      const imported = source.map(normalizeVehicleRecord);
+      vehicleMeasurements = imported;
+      persistVehicleMeasurements();
+      renderVehicleMeasurements();
+      log(`${imported.length} Fahrzeugmessungen importiert.`);
+    } catch (e) {
+      log('JSON Import fehlgeschlagen: ' + (e && e.message ? e.message : 'unbekannter Fehler'));
+    } finally {
+      event.target.value = '';
+    }
+  };
+  reader.onerror = () => {
+    log('JSON Datei konnte nicht gelesen werden.');
+    event.target.value = '';
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+function renderVehicleMeasurements() {
+  const rows = q('#vehicleRows');
+  rows.innerHTML = '';
+
+  if (!vehicleMeasurements.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="7" class="muted">Keine Fahrzeugmessungen gespeichert.</td>';
+    rows.appendChild(tr);
+    return;
+  }
+
+  const viewList = getVehicleViewList();
+  viewList.forEach((item) => {
+    const tr = document.createElement('tr');
+    const dt = new Date(item.ts || Date.now());
+    const dtText = Number.isNaN(dt.getTime()) ? '-' : dt.toLocaleString();
+    tr.innerHTML =
+      `<td>${dtText}</td>` +
+      `<td>${item.name || '-'}</td>` +
+      `<td>${Number(item.weight).toFixed(2)}</td>` +
+      `<td>${item.leftPercent !== undefined ? Number(item.leftPercent).toFixed(1) : '-'}</td>` +
+      `<td>${item.rightPercent !== undefined ? Number(item.rightPercent).toFixed(1) : '-'}</td>` +
+      `<td>${item.note || ''}</td>` +
+      `<td><button class="danger" type="button" data-del-id="${item.id}">Loeschen</button></td>`;
+    rows.appendChild(tr);
+  });
+
+  qa('[data-del-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = String(btn.getAttribute('data-del-id') || '');
+      const idx = vehicleMeasurements.findIndex(v => String(v.id) === id);
+      if (idx < 0) {
+        return;
+      }
+      vehicleMeasurements.splice(idx, 1);
+      persistVehicleMeasurements();
+      renderVehicleMeasurements();
+      log('Fahrzeugmessung geloescht.');
+    });
+  });
+}
+
+function saveVehicleMeasurement() {
+  if (!lastMeasurement || !Number.isFinite(Number(lastMeasurement.weight))) {
+    log('Keine gueltige Messung vorhanden. Erst MESSEN ausfuehren.');
+    return;
+  }
+
+  const name = (q('#vehicleName').value || '').trim();
+  const note = (q('#vehicleNote').value || '').trim();
+  if (!name) {
+    log('Bitte zuerst einen Fahrzeugnamen eingeben.');
+    return;
+  }
+
+  vehicleMeasurements.unshift({
+    id: makeVehicleId(),
+    ts: Date.now(),
+    name,
+    note,
+    weight: Number(lastMeasurement.weight),
+    leftPercent: lastMeasurement.leftPercent,
+    rightPercent: lastMeasurement.rightPercent
+  });
+  persistVehicleMeasurements();
+  renderVehicleMeasurements();
+  log(`Messung fuer "${name}" gespeichert.`);
+}
+
+function clearVehicleMeasurements() {
+  if (!confirm('Alle gespeicherten Fahrzeugmessungen wirklich loeschen?')) {
+    return;
+  }
+  vehicleMeasurements = [];
+  persistVehicleMeasurements();
+  renderVehicleMeasurements();
+  log('Fahrzeugmessungen geloescht.');
 }
 
 function renderStatus(s) {
@@ -2210,6 +2594,8 @@ function renderCalReport(report) {
 
 function updateWeightDisplay(m) {
   q('#weight').textContent = `${Number(m.weight).toFixed(2)} g`;
+  lastMeasurement = m;
+  applyWeightState(Number(m.weight));
   if (m.leftPercent !== undefined) {
     q('#shares').textContent = `LINKS ${Number(m.leftPercent).toFixed(1)} % | RECHTS ${Number(m.rightPercent).toFixed(1)} %`;
   }
@@ -2482,6 +2868,14 @@ async function doOtaFlash() {
 
 window.addEventListener('hashchange', applyHashTab);
 applyHashTab();
+loadAlertConfig();
+loadVehicleMeasurements();
+vehicleMeasurements = vehicleMeasurements.map(normalizeVehicleRecord);
+persistVehicleMeasurements();
+renderVehicleMeasurements();
+q('#vehicleSort').addEventListener('change', renderVehicleMeasurements);
+q('#vehicleFilter').addEventListener('input', renderVehicleMeasurements);
+q('#vehicleImportFile').addEventListener('change', handleVehicleImportJson);
 refreshAll();
 scanWifi();
 api('/api/version').then(v => {
