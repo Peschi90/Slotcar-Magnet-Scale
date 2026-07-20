@@ -158,6 +158,18 @@ MESSEN 10
   - Password: `slotcar123`
 - `STATUS` shows the current Wi-Fi mode (STA, AP, or AP+STA) and whether a STA connection is active.
 
+### Reachability in Network (without knowing IP)
+
+When connected to your router (STA mode), the device can be reached via:
+
+- `http://slotcar-magnet-scale.local` (mDNS, recommended)
+- `http://slotcar-magnet-scale.fritz.box` (common on FRITZ!Box networks)
+- Router DNS host entry (if your router supports hostname resolution)
+
+Fallback access point is always available via:
+
+- `http://192.168.4.1`
+
 ## Web Interface
 
 ![The SMS web dashboard — dark-themed single-page app showing a live weight reading of 0.10 g with left/right load distribution (61.7 % / 38.3 %), MESSEN / ROH / TARA action buttons, Wi-Fi connection details in STA mode with IP 192.168.1.184, and a real-time activity log at the bottom.](assets/images/webview.png)
@@ -179,6 +191,9 @@ The **System** tab of the web interface provides over-the-air updates:
 1. The device must be connected to Wi-Fi (STA mode).
 2. Click **Nach Updates suchen** — the browser queries the [GitHub Releases](https://github.com/Peschi90/Slotcar-Magnet-Scale/releases) for the latest `firmware.bin`.
 3. If a newer version is available, click **Jetzt flashen** — the device downloads, flashes, and reboots automatically.
+
+After OTA, the web app automatically checks cyclically whether the device is reachable again and then re-opens it directly.
+The same reconnect/open behavior is used after Wi-Fi settings changes and manual reboot from the System tab.
 
 ## Output Formats
 
@@ -369,6 +384,18 @@ MESSEN 10
   - Passwort: `slotcar123`
 - `STATUS` zeigt den aktuellen WLAN-Modus (STA, AP oder AP+STA) und ob eine STA-Verbindung aktiv ist.
 
+### Erreichbarkeit im Netzwerk (ohne bekannte IP)
+
+Wenn das Gerät im Heimnetz per STA verbunden ist, kann es in der Regel über folgende Adressen erreicht werden:
+
+- `http://slotcar-magnet-scale.local` (mDNS, empfohlen)
+- `http://slotcar-magnet-scale.fritz.box` (typisch bei FRITZ!Box-Netzen)
+- Hostname-Auflösung des Routers (falls vom Router unterstützt)
+
+Der Backup-AP bleibt weiterhin erreichbar über:
+
+- `http://192.168.4.1`
+
 ## Weboberfläche
 
 ![Das SMS-Web-Dashboard — Dark-Theme-Single-Page-App mit Live-Gewichtsanzeige 0,10 g, Links/Rechts-Lastverteilung (61,7 % / 38,3 %), Aktionsbuttons MESSEN / ROH / TARA, WLAN-Verbindungsdetails im STA-Modus mit IP 192.168.1.184 sowie einem Echtzeit-Aktivitätslog am unteren Rand.](assets/images/webview.png)
@@ -390,6 +417,9 @@ Der **System**-Tab der Weboberfläche ermöglicht Over-the-Air-Updates:
 1. Das Gerät muss per WLAN verbunden sein (STA-Modus).
 2. Klick auf **Nach Updates suchen** — der Browser prüft die [GitHub Releases](https://github.com/Peschi90/Slotcar-Magnet-Scale/releases) auf die neueste `firmware.bin`.
 3. Bei verfügbarer neuer Version Klick auf **Jetzt flashen** — das Gerät lädt die Firmware herunter, flasht sie und startet automatisch neu.
+
+Nach einem OTA-Update prüft die Weboberfläche zyklisch die Erreichbarkeit des Geräts und öffnet es automatisch wieder, sobald es online ist.
+Dasselbe Verhalten gilt nach WLAN-Umstellung und nach einem manuellen Neustart aus dem System-Tab.
 
 ## Ausgabeformate
 

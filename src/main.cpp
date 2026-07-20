@@ -3,6 +3,7 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266httpUpdate.h>
+#include <ESP8266mDNS.h>
 #include <HX711.h>
 #include <WiFiClientSecure.h>
 #include "version.h"
@@ -139,8 +140,46 @@ String storedWifiPassword;
 bool wifiConfigured = false;
 bool stationConnected = false;
 uint32_t lastWifiRetryMs = 0;
+bool mdnsActive = false;
 
 void handleCalibrationPage();
+
+void stopMdnsIfRunning() {
+  if (!mdnsActive) {
+    return;
+  }
+  MDNS.close();
+  mdnsActive = false;
+  Serial.println(F("INFO: mDNS gestoppt."));
+}
+
+void startMdnsIfPossible() {
+  if (!stationConnected || mdnsActive) {
+    return;
+  }
+
+  // ESP8266mDNS expects a plain host label without dots.
+  String host = String(DEVICE_HOSTNAME);
+  host.toLowerCase();
+  host.replace(" ", "-");
+  host.replace("_", "-");
+  while (host.indexOf("--") >= 0) {
+    host.replace("--", "-");
+  }
+  host.replace(".", "");
+  if (host.length() == 0) {
+    host = "slotcar-magnet-scale";
+  }
+
+  if (!MDNS.begin(host.c_str())) {
+    Serial.println(F("WARNUNG: mDNS konnte nicht gestartet werden."));
+    return;
+  }
+
+  MDNS.addService("http", "tcp", 80);
+  mdnsActive = true;
+  Serial.printf("OK: mDNS aktiv: http://%s.local\n", host.c_str());
+}
 
 uint32_t fnv1a(const uint8_t *data, size_t len) {
   uint32_t hash = 2166136261UL;
@@ -359,9 +398,11 @@ bool connectToConfiguredWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     stationConnected = true;
     Serial.printf("OK: WLAN verbunden. IP: %s\n", WiFi.localIP().toString().c_str());
+    startMdnsIfPossible();
     return true;
   }
 
+  stopMdnsIfRunning();
   Serial.println(F("WARNUNG: WLAN-Verbindung fehlgeschlagen."));
   return false;
 }
@@ -387,10 +428,19 @@ void ensureFallbackAccessPoint() {
 
 void serviceWifi() {
   const wl_status_t status = WiFi.status();
+  const bool wasConnected = stationConnected;
   stationConnected = status == WL_CONNECTED;
 
   if (stationConnected) {
+    if (!wasConnected) {
+      Serial.printf("OK: WLAN verbunden. IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+    startMdnsIfPossible();
     return;
+  }
+
+  if (wasConnected) {
+    stopMdnsIfRunning();
   }
 
   if (!wifiConfigured || storedWifiSsid.length() == 0) {
@@ -488,6 +538,8 @@ void printStatus() {
   Serial.printf("WLAN verbunden: %s\n", stationConnected ? "ja" : "nein");
   if (stationConnected) {
     Serial.printf("STA IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Hostname: %s\n", DEVICE_HOSTNAME);
+    Serial.printf("mDNS: %s.local (%s)\n", DEVICE_HOSTNAME, mdnsActive ? "aktiv" : "inaktiv");
   }
   if (mode == WIFI_AP || mode == WIFI_AP_STA) {
     Serial.printf("AP SSID: %s\n", FALLBACK_AP_SSID);
@@ -1954,6 +2006,7 @@ void handleRootPage() {
           <button class="alt" onclick="refreshAll()">STATUS aktualisieren</button>
           <button class="danger" onclick="doReset()">RESET</button>
         </div>
+        <div id="reconnectStatus" class="pill" style="display:none;margin-top:8px"></div>
         <pre id="statusDump"></pre>
         <h2 style="margin-top:12px">Magnet-Filter Grenzwerte</h2>
         <div class="card">
@@ -2008,6 +2061,9 @@ let wizardRecordedPoints = { LINKS: false, MITTE: false, RECHTS: false };
 let alertConfig = { ...ALERT_DEFAULTS };
 let vehicleMeasurements = [];
 let lastMeasurement = null;
+let reconnectWatcherTimer = null;
+let reconnectDeadlineMs = 0;
+let reconnectReason = '';
 
 const log = (m) => {
   const el = q('#log');
@@ -2728,6 +2784,7 @@ async function saveWifi() {
     const password = encodeURIComponent(q('#pass').value || '');
     const resp = await api('/api/wifi/save?ssid=' + ssid + '&password=' + password);
     log(`WLAN gespeichert. Verbunden: ${resp.connected ? 'ja' : 'nein'}`);
+    beginReconnectWatch('WLAN Umstellung');
     await refreshStatus();
   } catch (e) {
     log(e.message);
@@ -2799,6 +2856,7 @@ async function stopStream() {
 
 async function doReset() {
   try {
+    beginReconnectWatch('Neustart');
     await api('/api/reset');
     log('Reset ausgefuehrt');
     await refreshAll();
@@ -2808,6 +2866,107 @@ async function doReset() {
 }
 
 let _otaFlashUrl = null;
+
+function collectReconnectCandidates() {
+  const out = [];
+  const push = (base) => {
+    if (!base) return;
+    const normalized = String(base).replace(/\/+$/, '');
+    if (!normalized) return;
+    if (!out.includes(normalized)) out.push(normalized);
+  };
+
+  push(window.location.origin);
+  push('http://slotcar-magnet-scale.local');
+  push('http://slotcar-magnet-scale.fritz.box');
+  if (latestStatus && latestStatus.staIp) {
+    push('http://' + latestStatus.staIp);
+  }
+  if (latestStatus && latestStatus.apIp) {
+    push('http://' + latestStatus.apIp);
+  }
+  return out;
+}
+
+function probeBaseUrl(baseUrl, timeoutMs) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    img.onload = () => finish(true);
+    img.onerror = () => finish(false);
+    img.src = `${baseUrl}/favicon.png?t=${Date.now()}`;
+  });
+}
+
+async function waitForDeviceOnlineAndOpen(candidates, totalTimeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < totalTimeoutMs) {
+    for (const base of candidates) {
+      try {
+        const ok = await probeBaseUrl(base, 1200);
+        if (ok) {
+          window.location.href = `${base}/`;
+          return true;
+        }
+      } catch (_) {
+      }
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return false;
+}
+
+function beginReconnectWatch(reason) {
+  const candidates = collectReconnectCandidates();
+  reconnectReason = reason || 'Reconnect';
+  reconnectDeadlineMs = Date.now() + 120000;
+
+  const statusEl = q('#reconnectStatus');
+  if (statusEl) {
+    statusEl.style.display = 'inline-block';
+  }
+
+  if (reconnectWatcherTimer) {
+    clearInterval(reconnectWatcherTimer);
+    reconnectWatcherTimer = null;
+  }
+
+  const updateReconnectStatusText = () => {
+    const leftMs = reconnectDeadlineMs - Date.now();
+    const leftSec = Math.max(0, Math.ceil(leftMs / 1000));
+    if (statusEl) {
+      statusEl.textContent = `${reconnectReason}: Auto-Reconnect aktiv (${leftSec}s)`;
+    }
+  };
+
+  updateReconnectStatusText();
+  reconnectWatcherTimer = setInterval(updateReconnectStatusText, 1000);
+
+  log(`${reason}: pruefe zyklisch Erreichbarkeit (${candidates.join(' | ')})`);
+  waitForDeviceOnlineAndOpen(candidates, 120000).then((ok) => {
+    if (reconnectWatcherTimer) {
+      clearInterval(reconnectWatcherTimer);
+      reconnectWatcherTimer = null;
+    }
+    if (!ok) {
+      if (statusEl) {
+        statusEl.style.display = 'none';
+      }
+      log('Geraet noch nicht automatisch wieder erreichbar. Bitte manuell neu oeffnen.');
+    } else if (statusEl) {
+      statusEl.textContent = `${reconnectReason}: Geraet wieder erreichbar, oeffne Seite...`;
+    }
+  });
+}
 
 async function checkUpdate() {
   log('Suche nach Updates...');
@@ -2851,11 +3010,12 @@ async function doOtaFlash() {
   btn.disabled = true;
   log('Starte OTA-Update...');
   try {
+    beginReconnectWatch('OTA Update');
     const r = await fetch('/api/ota/flash?url=' + encodeURIComponent(_otaFlashUrl));
     const d = await r.json();
     if (d.ok) {
-      document.getElementById('updateText').textContent = 'Update laeuft... Bitte ca. 30 s warten, dann Seite neu laden.';
-      log('OTA gestartet – Geraet wird neu gestartet.');
+      document.getElementById('updateText').textContent = 'Update laeuft... Seite wird automatisch erneut geoeffnet sobald das Geraet wieder erreichbar ist.';
+      log('OTA gestartet – Geraet wird neu gestartet. Auto-Reconnect aktiv.');
     } else {
       log('OTA Fehler: ' + (d.error || 'unbekannt'));
       btn.disabled = false;
@@ -3242,5 +3402,8 @@ void loop() {
   pollSerialCommands();
   server.handleClient();
   serviceWifi();
+  if (mdnsActive) {
+    MDNS.update();
+  }
   handleStreaming();
 }
