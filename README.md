@@ -1,6 +1,6 @@
 # Slotcar Magnet Scale — ESP8266 Firmware
 
-[🇬🇧 English Version](#english-version)  |  [🇩🇪 Deutsche Version](#deutsche-version)
+[🇬🇧 English Version](#english-version)  |  [🇩🇪 Deutsche Version](#deutsche-version)  |  [🖨️ 3D Print Files](#makerworld-link)
 
 ---
 
@@ -9,6 +9,8 @@
 # 🇬🇧 English Version
 
 > [🇩🇪 Zur deutschen Version](#deutsche-version)
+
+> 🖨️ **3D print files on MakerWorld:** [Slotcar Magnet Scale](https://makerworld.com/de/models/3073003-slotcar-magnet-scale#profileId-3459660)
 
 ![SMS product render — a black rectangular measurement platform with two polished steel rails running lengthwise, a symmetric position scale from 0 to 100 on both sides, and the lime-green SMS logo. Features: Precise Magnetic Measurement, Perfect for Slotcar Setup, Simple Accurate Effective. Tagline: Short & Precise.](assets/images/SMS_Thumb.png)
 
@@ -219,6 +221,8 @@ Temporary calibration points are not stored.
 
 > [🇬🇧 To the English version](#english-version)
 
+> 🖨️ **3D-Druckdateien auf MakerWorld:** [Slotcar Magnet Scale](https://makerworld.com/de/models/3073003-slotcar-magnet-scale#profileId-3459660)
+
 ![SMS Produktrender — eine schwarze rechteckige Messplattform mit zwei polierten Stahlschienen in Längsrichtung, einer symmetrischen Positionsskala von 0 bis 100 auf beiden Seiten und dem neongrünen SMS-Logo. Features: Precise Magnetic Measurement, Perfect for Slotcar Setup, Simple Accurate Effective. Claim: Short & Precise.](assets/images/SMS_Thumb.png)
 
 Dieses Projekt liest zwei Wägezellen aus, die an den gegenüberliegenden Enden einer gemeinsamen langen Platte montiert sind.
@@ -421,3 +425,79 @@ Temporäre Kalibrierpunkte werden nicht gespeichert.
 - Kabel dürfen die Platte nicht mechanisch mitziehen.
 - Bei starker Verspannung steigen die Kalibrierfehler deutlich.
 - Wenn `KAL_BERECHNEN` große Restfehler meldet, zuerst Mechanik prüfen, dann Kalibrierung wiederholen.
+
+---
+
+<a id="makerworld-link"></a>
+
+## 🖨️ 3D-Druckdateien / 3D Print Files
+
+Die passenden Gehäuse- und Halterungsdateien für dieses Projekt sind auf MakerWorld verfügbar:
+
+**[➜ Slotcar Magnet Scale auf MakerWorld](https://makerworld.com/de/models/3073003-slotcar-magnet-scale#profileId-3459660)**
+
+*The matching enclosure and mount files for this project are available on MakerWorld (link above).*
+
+---
+
+<a id="legal"></a>
+
+## ⚖️ Legal Notice / Impressum
+
+### 🇬🇧 Legal Notice
+
+This is a private, non-commercial open-source hobby project published under the MIT License.
+No goods or services are offered. No revenue is generated.
+
+**Responsible for the content of this repository:**
+
+> [First Name Last Name]  
+> [Street and House Number]  
+> [Postcode City], Austria  
+> GitHub: [https://github.com/Peschi90](https://github.com/Peschi90)
+
+For questions or bug reports please use the [GitHub Issues](https://github.com/Peschi90/Slotcar-Magnet-Scale/issues).
+
+---
+
+### 🇩🇪 Impressum
+
+Dieses Projekt ist ein privates, nicht-kommerzielles Open-Source-Hobbyprojekt, veröffentlicht unter der MIT-Lizenz.
+Es werden keine Waren oder Dienstleistungen angeboten und kein Umsatz erzielt.
+
+**Verantwortlich für den Inhalt dieses Repositories:**
+
+> [Vorname Nachname]  
+> [Straße und Hausnummer]  
+> [PLZ Ort], Österreich  
+> GitHub: [https://github.com/Peschi90](https://github.com/Peschi90)
+
+Für Fragen und Fehlerberichte bitte die [GitHub Issues](https://github.com/Peschi90/Slotcar-Magnet-Scale/issues) verwenden.
+
+---
+
+<a id="privacy"></a>
+
+## 🔒 Privacy Policy / Datenschutz
+
+### 🇬🇧 Privacy Policy
+
+This repository does **not** collect, store, or process any personal data.
+
+- **GitHub:** By visiting this repository, GitHub may collect access logs and usage data according to [GitHub's Privacy Policy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
+- **Firmware / Device:** The firmware runs entirely locally on the ESP8266 microcontroller. It connects only to the Wi-Fi network you configure. No data is transmitted to external servers. The Wi-Fi credentials you enter are stored encrypted only on the device itself (EEPROM).
+- **OTA Updates:** When checking for updates, the browser (not the device) contacts the GitHub API (`api.github.com`). No personal data is transmitted in this process.
+
+If you have any privacy-related questions, please contact via [GitHub Issues](https://github.com/Peschi90/Slotcar-Magnet-Scale/issues).
+
+---
+
+### 🇩🇪 Datenschutzerklärung
+
+Dieses Repository **erhebt, speichert und verarbeitet keine** personenbezogenen Daten.
+
+- **GitHub:** Beim Besuch dieses Repositories kann GitHub Zugriffsprotokolle und Nutzungsdaten gemäß der [GitHub-Datenschutzrichtlinie](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) erfassen.
+- **Firmware / Gerät:** Die Firmware läuft vollständig lokal auf dem ESP8266-Mikrocontroller. Sie verbindet sich ausschließlich mit dem von Ihnen konfigurierten WLAN-Netzwerk. Es werden keine Daten an externe Server übertragen. Die eingegebenen WLAN-Zugangsdaten werden ausschließlich lokal auf dem Gerät gespeichert (EEPROM).
+- **OTA-Updates:** Bei der Update-Prüfung kontaktiert der Browser (nicht das Gerät) die GitHub-API (`api.github.com`). Dabei werden keine personenbezogenen Daten übermittelt.
+
+Bei datenschutzbezogenen Fragen bitte über die [GitHub Issues](https://github.com/Peschi90/Slotcar-Magnet-Scale/issues) melden.
