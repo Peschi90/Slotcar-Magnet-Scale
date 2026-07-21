@@ -143,6 +143,8 @@ bool stationConnected = false;
 uint32_t lastWifiRetryMs = 0;
 bool mdnsActive = false;
 bool otaBusy = false;
+bool otaLowRamModeActive = false;
+bool otaStreamWasEnabled = false;
 bool otaUploadRejected = false;
 bool otaUploadHeaderChecked = false;
 size_t otaUploadMaxSize = 0;
@@ -186,6 +188,37 @@ void startMdnsIfPossible() {
   MDNS.addService("http", "tcp", 80);
   mdnsActive = true;
   Serial.printf("OK: mDNS aktiv: http://%s.local\n", host.c_str());
+}
+
+void enterOtaLowRamMode() {
+  if (otaLowRamModeActive) {
+    return;
+  }
+
+  otaLowRamModeActive = true;
+  otaBusy = true;
+  otaStreamWasEnabled = streamEnabled;
+  streamEnabled = false;
+  stopMdnsIfRunning();
+  yield();
+}
+
+void leaveOtaLowRamMode(bool restoreStream) {
+  if (!otaLowRamModeActive) {
+    otaBusy = false;
+    if (restoreStream) {
+      streamEnabled = otaStreamWasEnabled;
+    }
+    startMdnsIfPossible();
+    return;
+  }
+
+  otaLowRamModeActive = false;
+  otaBusy = false;
+  if (restoreStream) {
+    streamEnabled = otaStreamWasEnabled;
+  }
+  startMdnsIfPossible();
 }
 
 uint32_t fnv1a(const uint8_t *data, size_t len) {
@@ -1460,6 +1493,10 @@ void handleApiOtaInfo() {
 }
 
 void handleApiOtaFlash() {
+  if (otaBusy) {
+    sendJson(409, "{\"ok\":false,\"error\":\"OTA laeuft bereits\"}");
+    return;
+  }
   if (!stationConnected) {
     sendJson(400, "{\"ok\":false,\"error\":\"Kein WLAN verbunden\"}");
     return;
@@ -1474,9 +1511,7 @@ void handleApiOtaFlash() {
   server.client().flush();
   delay(300);
 
-  otaBusy = true;
-  streamEnabled = false;
-  stopMdnsIfRunning();
+  enterOtaLowRamMode();
 
   // Free heap for TLS/HTTP updater by disabling AP while OTA is running.
   const WiFiMode_t modeBeforeOta = WiFi.getMode();
@@ -1499,14 +1534,19 @@ void handleApiOtaFlash() {
   const t_httpUpdate_return ret = ESPhttpUpdate.update(tlsClient, url);
 
   if (ret == HTTP_UPDATE_FAILED) {
-    otaBusy = false;
+    leaveOtaLowRamMode(true);
     if (apWasActive) {
       ensureFallbackAccessPoint();
     }
     Serial.printf("FEHLER OTA: [%d] %s\n",
       ESPhttpUpdate.getLastError(),
       ESPhttpUpdate.getLastErrorString().c_str());
-    startMdnsIfPossible();
+  } else if (ret == HTTP_UPDATE_NO_UPDATES) {
+    leaveOtaLowRamMode(true);
+    if (apWasActive) {
+      ensureFallbackAccessPoint();
+    }
+    Serial.println(F("INFO: OTA: Keine neue Firmware verfuegbar."));
   }
 }
 
@@ -1514,8 +1554,7 @@ void handleApiOtaUpload() {
   HTTPUpload &upload = server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
-    otaBusy = true;
-    stopMdnsIfRunning();
+    enterOtaLowRamMode();
     otaUploadRejected = false;
     otaUploadHeaderChecked = false;
     otaUploadError = "";
@@ -1581,9 +1620,8 @@ void handleApiOtaUpload() {
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     otaUploadRejected = true;
     otaUploadError = "Upload wurde abgebrochen.";
-    otaBusy = false;
     Update.end();
-    startMdnsIfPossible();
+    leaveOtaLowRamMode(true);
     Serial.println(F("OTA Upload abgebrochen"));
   }
   yield();
@@ -3319,13 +3357,12 @@ void setupWebServer() {
         delay(120);
         ESP.restart();
       } else {
-        otaBusy = false;
+        leaveOtaLowRamMode(true);
         String err = otaUploadError;
         if (err.length() == 0) {
           err = "OTA Upload fehlgeschlagen";
         }
         server.send(500, "application/json", "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}");
-        startMdnsIfPossible();
       }
     },
     handleApiOtaUpload);
@@ -3649,9 +3686,13 @@ void setup() {
 void loop() {
   pollSerialCommands();
   server.handleClient();
-  serviceWifi();
+  if (!otaBusy) {
+    serviceWifi();
+  }
   if (mdnsActive && !otaBusy) {
     MDNS.update();
   }
-  handleStreaming();
+  if (!otaBusy) {
+    handleStreaming();
+  }
 }
