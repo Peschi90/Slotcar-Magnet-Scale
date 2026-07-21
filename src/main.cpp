@@ -142,6 +142,7 @@ bool wifiConfigured = false;
 bool stationConnected = false;
 uint32_t lastWifiRetryMs = 0;
 bool mdnsActive = false;
+bool otaBusy = false;
 bool otaUploadRejected = false;
 bool otaUploadHeaderChecked = false;
 size_t otaUploadMaxSize = 0;
@@ -160,7 +161,7 @@ void stopMdnsIfRunning() {
 }
 
 void startMdnsIfPossible() {
-  if (!stationConnected || mdnsActive) {
+  if (!stationConnected || mdnsActive || otaBusy) {
     return;
   }
 
@@ -1473,6 +1474,9 @@ void handleApiOtaFlash() {
   server.client().flush();
   delay(300);
 
+  otaBusy = true;
+  stopMdnsIfRunning();
+
   WiFiClientSecure tlsClient;
   tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
 
@@ -1482,9 +1486,11 @@ void handleApiOtaFlash() {
   const t_httpUpdate_return ret = ESPhttpUpdate.update(tlsClient, url);
 
   if (ret == HTTP_UPDATE_FAILED) {
+    otaBusy = false;
     Serial.printf("FEHLER OTA: [%d] %s\n",
       ESPhttpUpdate.getLastError(),
       ESPhttpUpdate.getLastErrorString().c_str());
+    startMdnsIfPossible();
   }
 }
 
@@ -1492,6 +1498,8 @@ void handleApiOtaUpload() {
   HTTPUpload &upload = server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
+    otaBusy = true;
+    stopMdnsIfRunning();
     otaUploadRejected = false;
     otaUploadHeaderChecked = false;
     otaUploadError = "";
@@ -1557,7 +1565,9 @@ void handleApiOtaUpload() {
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     otaUploadRejected = true;
     otaUploadError = "Upload wurde abgebrochen.";
+    otaBusy = false;
     Update.end();
+    startMdnsIfPossible();
     Serial.println(F("OTA Upload abgebrochen"));
   }
   yield();
@@ -3293,11 +3303,13 @@ void setupWebServer() {
         delay(120);
         ESP.restart();
       } else {
+        otaBusy = false;
         String err = otaUploadError;
         if (err.length() == 0) {
           err = "OTA Upload fehlgeschlagen";
         }
         server.send(500, "application/json", "{\"ok\":false,\"error\":\"" + jsonEscape(err) + "\"}");
+        startMdnsIfPossible();
       }
     },
     handleApiOtaUpload);
@@ -3622,7 +3634,7 @@ void loop() {
   pollSerialCommands();
   server.handleClient();
   serviceWifi();
-  if (mdnsActive) {
+  if (mdnsActive && !otaBusy) {
     MDNS.update();
   }
   handleStreaming();
