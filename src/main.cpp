@@ -2,11 +2,8 @@
 #include <EEPROM.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266httpUpdate.h>
-#include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <HX711.h>
-#include <WiFiClientSecure.h>
 #include <Updater.h>
 #include "version.h"
 
@@ -1493,173 +1490,6 @@ void handleApiOtaInfo() {
                    ",\"requiredMagic\":\"0xE9\"}");
 }
 
-bool performHttpStreamOta(const String &url, String &errorText) {
-  const size_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-
-  for (uint8_t attempt = 1; attempt <= 2; ++attempt) {
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.reconnect();
-      delay(300);
-      yield();
-    }
-
-    WiFiClientSecure tlsClient;
-    tlsClient.setBufferSizes(512, 512);
-    tlsClient.setInsecure();
-    tlsClient.setTimeout(15000);
-
-    HTTPClient http;
-    http.setReuse(false);
-    http.setTimeout(15000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-
-    if (!http.begin(tlsClient, url)) {
-      errorText = "HTTP init fehlgeschlagen";
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: HTTP init fehlgeschlagen, neuer Versuch..."));
-        delay(500);
-        yield();
-      }
-      continue;
-    }
-
-    const int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-      errorText = "HTTP Status " + String(code);
-      http.end();
-      if (attempt < 2) {
-        Serial.printf("WARNUNG OTA: HTTP %d, neuer Versuch...\n", code);
-        WiFi.reconnect();
-        delay(600);
-        yield();
-      }
-      continue;
-    }
-
-    const int contentLength = http.getSize();
-    if (contentLength > 0 && static_cast<size_t>(contentLength) > maxSketch) {
-      errorText = "Firmware-Datei zu gross fuer OTA-Slot";
-      http.end();
-      return false;
-    }
-
-    const size_t otaTargetSize =
-      (contentLength > 0) ? static_cast<size_t>(contentLength) : maxSketch;
-
-    if (!Update.begin(otaTargetSize)) {
-      errorText = "Update.begin fehlgeschlagen";
-      Update.printError(Serial);
-      http.end();
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: Update.begin fehlgeschlagen, neuer Versuch..."));
-        delay(500);
-        yield();
-      }
-      continue;
-    }
-
-    WiFiClient *stream = http.getStreamPtr();
-    if (stream == nullptr) {
-      errorText = "HTTP Stream nicht verfuegbar";
-      Update.end(false);
-      http.end();
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: Kein HTTP-Stream, neuer Versuch..."));
-        delay(500);
-        yield();
-      }
-      continue;
-    }
-
-    const size_t written = Update.writeStream(*stream);
-    bool sizeOk = true;
-    if (contentLength > 0) {
-      sizeOk = written == static_cast<size_t>(contentLength);
-    }
-
-    if (!sizeOk) {
-      errorText = "Unvollstaendiger Download";
-      Update.end(false);
-      http.end();
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: Download unvollstaendig, neuer Versuch..."));
-        WiFi.reconnect();
-        delay(700);
-        yield();
-      }
-      continue;
-    }
-
-    if (!Update.end()) {
-      errorText = "Update-Ende fehlgeschlagen";
-      Update.printError(Serial);
-      http.end();
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: Update.end fehlgeschlagen, neuer Versuch..."));
-        delay(600);
-        yield();
-      }
-      continue;
-    }
-
-    if (!Update.isFinished()) {
-      errorText = "Update unvollstaendig";
-      http.end();
-      if (attempt < 2) {
-        Serial.println(F("WARNUNG OTA: Update nicht abgeschlossen, neuer Versuch..."));
-        delay(600);
-        yield();
-      }
-      continue;
-    }
-
-    http.end();
-    return true;
-  }
-
-  return false;
-}
-
-void handleApiOtaFlash() {
-  if (otaBusy) {
-    sendJson(409, "{\"ok\":false,\"error\":\"OTA laeuft bereits\"}");
-    return;
-  }
-  if (!stationConnected) {
-    sendJson(400, "{\"ok\":false,\"error\":\"Kein WLAN verbunden\"}");
-    return;
-  }
-  String url = server.arg("url");
-  if (url.length() == 0) {
-    sendJson(400, "{\"ok\":false,\"error\":\"url Parameter fehlt\"}");
-    return;
-  }
-
-  sendJson(200, "{\"ok\":true,\"message\":\"OTA Update gestartet\"}");
-  server.client().flush();
-  delay(300);
-
-  enterOtaLowRamMode();
-
-  // Keep AP/network mode untouched for OTA stability.
-  Serial.printf("INFO OTA: Freier Heap vor Download: %u bytes\n", ESP.getFreeHeap());
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-
-  String otaError;
-  const bool otaOk = performHttpStreamOta(url, otaError);
-
-  if (!otaOk) {
-    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
-    leaveOtaLowRamMode(true);
-    Serial.printf("FEHLER OTA: %s\n", otaError.c_str());
-    return;
-  }
-
-  Serial.println(F("OK OTA: Firmware erfolgreich geladen, Neustart..."));
-  delay(120);
-  ESP.restart();
-}
-
 void handleApiOtaUpload() {
   HTTPUpload &upload = server.upload();
 
@@ -2298,7 +2128,7 @@ void handleRootPage() {
         <div id="updateBox" style="display:none;margin-top:10px" class="card">
           <p id="updateText" style="margin:4px 0"></p>
           <div id="updateActions" style="display:none;margin-top:8px">
-            <button id="flashBtn" onclick="doOtaFlash()">Jetzt flashen</button>
+            <button id="downloadBtn" onclick="downloadLatestFirmware()">Firmware herunterladen</button>
           </div>
         </div>
         <div class="card" style="margin-top:10px">
@@ -3153,7 +2983,7 @@ async function doReboot() {
   }
 }
 
-let _otaFlashUrl = null;
+let _latestFirmwareUrl = null;
 
 function collectReconnectCandidates() {
   const out = [];
@@ -3276,7 +3106,7 @@ async function checkUpdate() {
       actions.style.display = 'none';
       return;
     }
-    _otaFlashUrl = asset.browser_download_url;
+    _latestFirmwareUrl = asset.browser_download_url;
 
     const parseVersionParts = (v) => {
       const m = String(v || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/i);
@@ -3302,7 +3132,11 @@ async function checkUpdate() {
     } else {
       txt.innerHTML = 'Neue Version verfuegbar: <strong>' + latest + '</strong> (aktuell: ' + cur + ')';
       actions.style.display = '';
-      document.getElementById('flashBtn').disabled = false;
+      const downloadBtn = document.getElementById('downloadBtn');
+      if (downloadBtn) {
+        downloadBtn.disabled = false;
+        downloadBtn.dataset.url = _latestFirmwareUrl;
+      }
     }
     log('Neueste Version: ' + latest + ' | Aktuell: ' + cur);
   } catch (e) {
@@ -3310,27 +3144,15 @@ async function checkUpdate() {
   }
 }
 
-async function doOtaFlash() {
-  if (!_otaFlashUrl) return;
-  if (!confirm('Firmware flashen? Das Geraet startet nach dem Update neu.')) return;
-  const btn = document.getElementById('flashBtn');
-  btn.disabled = true;
-  log('Starte OTA-Update...');
-  try {
-    beginReconnectWatch('OTA Update');
-    const r = await fetch('/api/ota/flash?url=' + encodeURIComponent(_otaFlashUrl));
-    const d = await r.json();
-    if (d.ok) {
-      document.getElementById('updateText').textContent = 'Update laeuft... Seite wird automatisch erneut geoeffnet sobald das Geraet wieder erreichbar ist.';
-      log('OTA gestartet – Geraet wird neu gestartet. Auto-Reconnect aktiv.');
-    } else {
-      log('OTA Fehler: ' + (d.error || 'unbekannt'));
-      btn.disabled = false;
-    }
-  } catch (e) {
-    log('OTA Fehler: ' + e.message);
-    btn.disabled = false;
+function downloadLatestFirmware() {
+  const btn = document.getElementById('downloadBtn');
+  const url = btn ? btn.dataset.url : '';
+  if (!url) {
+    log('Keine Download-URL verfuegbar. Bitte zuerst nach Updates suchen.');
+    return;
   }
+  window.open(url, '_blank');
+  log('Firmware-Download gestartet. Danach manuell ueber .bin Upload flashen.');
 }
 
 async function doManualOtaUpload() {
@@ -3457,7 +3279,6 @@ void setupWebServer() {
   server.on("/api/reboot", HTTP_GET, handleApiReboot);
   server.on("/api/version", HTTP_GET, handleApiVersion);
   server.on("/api/ota/info", HTTP_GET, handleApiOtaInfo);
-  server.on("/api/ota/flash", HTTP_GET, handleApiOtaFlash);
   server.on("/api/ota/upload", HTTP_POST,
     []() {
       const bool ok = !Update.hasError() && !otaUploadRejected;
