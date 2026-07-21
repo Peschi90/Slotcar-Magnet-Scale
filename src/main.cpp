@@ -1513,19 +1513,8 @@ void handleApiOtaFlash() {
 
   enterOtaLowRamMode();
 
-  // Free heap for TLS/HTTP updater by disabling AP while OTA is running.
-  const WiFiMode_t modeBeforeOta = WiFi.getMode();
-  const bool apWasActive = (modeBeforeOta == WIFI_AP || modeBeforeOta == WIFI_AP_STA);
-  if (apWasActive) {
-    WiFi.softAPdisconnect(true);
-    delay(50);
-    yield();
-    Serial.println(F("INFO: AP fuer OTA temporar deaktiviert (mehr Heap)."));
-  }
-
-  WiFiClientSecure tlsClient;
-  tlsClient.setBufferSizes(512, 512);
-  tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
+  // Keep AP/network mode untouched for OTA stability.
+  Serial.printf("INFO OTA: Freier Heap vor Download: %u bytes\n", ESP.getFreeHeap());
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
@@ -1535,6 +1524,15 @@ void handleApiOtaFlash() {
   String lastErrText;
   t_httpUpdate_return ret = HTTP_UPDATE_FAILED;
   for (uint8_t attempt = 1; attempt <= 2; ++attempt) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+      delay(250);
+      yield();
+    }
+
+    WiFiClientSecure tlsClient;
+    tlsClient.setBufferSizes(512, 512);
+    tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
     ret = ESPhttpUpdate.update(tlsClient, url);
     if (ret != HTTP_UPDATE_FAILED) {
       break;
@@ -1555,18 +1553,12 @@ void handleApiOtaFlash() {
   if (ret == HTTP_UPDATE_FAILED) {
     WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
     leaveOtaLowRamMode(true);
-    if (apWasActive) {
-      ensureFallbackAccessPoint();
-    }
     Serial.printf("FEHLER OTA: [%d] %s\n",
       lastErr,
       lastErrText.c_str());
   } else if (ret == HTTP_UPDATE_NO_UPDATES) {
     WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
     leaveOtaLowRamMode(true);
-    if (apWasActive) {
-      ensureFallbackAccessPoint();
-    }
     Serial.println(F("INFO: OTA: Keine neue Firmware verfuegbar."));
   }
 }
