@@ -3,6 +3,7 @@
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266httpUpdate.h>
+#include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <HX711.h>
 #include <WiFiClientSecure.h>
@@ -1492,6 +1493,133 @@ void handleApiOtaInfo() {
                    ",\"requiredMagic\":\"0xE9\"}");
 }
 
+bool performHttpStreamOta(const String &url, String &errorText) {
+  const size_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+
+  for (uint8_t attempt = 1; attempt <= 2; ++attempt) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+      delay(300);
+      yield();
+    }
+
+    WiFiClientSecure tlsClient;
+    tlsClient.setBufferSizes(512, 512);
+    tlsClient.setInsecure();
+    tlsClient.setTimeout(15000);
+
+    HTTPClient http;
+    http.setReuse(false);
+    http.setTimeout(15000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    if (!http.begin(tlsClient, url)) {
+      errorText = "HTTP init fehlgeschlagen";
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: HTTP init fehlgeschlagen, neuer Versuch..."));
+        delay(500);
+        yield();
+      }
+      continue;
+    }
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+      errorText = "HTTP Status " + String(code);
+      http.end();
+      if (attempt < 2) {
+        Serial.printf("WARNUNG OTA: HTTP %d, neuer Versuch...\n", code);
+        WiFi.reconnect();
+        delay(600);
+        yield();
+      }
+      continue;
+    }
+
+    const int contentLength = http.getSize();
+    if (contentLength > 0 && static_cast<size_t>(contentLength) > maxSketch) {
+      errorText = "Firmware-Datei zu gross fuer OTA-Slot";
+      http.end();
+      return false;
+    }
+
+    const size_t otaTargetSize =
+      (contentLength > 0) ? static_cast<size_t>(contentLength) : maxSketch;
+
+    if (!Update.begin(otaTargetSize)) {
+      errorText = "Update.begin fehlgeschlagen";
+      Update.printError(Serial);
+      http.end();
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: Update.begin fehlgeschlagen, neuer Versuch..."));
+        delay(500);
+        yield();
+      }
+      continue;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    if (stream == nullptr) {
+      errorText = "HTTP Stream nicht verfuegbar";
+      Update.end(false);
+      http.end();
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: Kein HTTP-Stream, neuer Versuch..."));
+        delay(500);
+        yield();
+      }
+      continue;
+    }
+
+    const size_t written = Update.writeStream(*stream);
+    bool sizeOk = true;
+    if (contentLength > 0) {
+      sizeOk = written == static_cast<size_t>(contentLength);
+    }
+
+    if (!sizeOk) {
+      errorText = "Unvollstaendiger Download";
+      Update.end(false);
+      http.end();
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: Download unvollstaendig, neuer Versuch..."));
+        WiFi.reconnect();
+        delay(700);
+        yield();
+      }
+      continue;
+    }
+
+    if (!Update.end()) {
+      errorText = "Update-Ende fehlgeschlagen";
+      Update.printError(Serial);
+      http.end();
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: Update.end fehlgeschlagen, neuer Versuch..."));
+        delay(600);
+        yield();
+      }
+      continue;
+    }
+
+    if (!Update.isFinished()) {
+      errorText = "Update unvollstaendig";
+      http.end();
+      if (attempt < 2) {
+        Serial.println(F("WARNUNG OTA: Update nicht abgeschlossen, neuer Versuch..."));
+        delay(600);
+        yield();
+      }
+      continue;
+    }
+
+    http.end();
+    return true;
+  }
+
+  return false;
+}
+
 void handleApiOtaFlash() {
   if (otaBusy) {
     sendJson(409, "{\"ok\":false,\"error\":\"OTA laeuft bereits\"}");
@@ -1517,50 +1645,19 @@ void handleApiOtaFlash() {
   Serial.printf("INFO OTA: Freier Heap vor Download: %u bytes\n", ESP.getFreeHeap());
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
-  ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  ESPhttpUpdate.rebootOnUpdate(true);
+  String otaError;
+  const bool otaOk = performHttpStreamOta(url, otaError);
 
-  int lastErr = 0;
-  String lastErrText;
-  t_httpUpdate_return ret = HTTP_UPDATE_FAILED;
-  for (uint8_t attempt = 1; attempt <= 2; ++attempt) {
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.reconnect();
-      delay(250);
-      yield();
-    }
-
-    WiFiClientSecure tlsClient;
-    tlsClient.setBufferSizes(512, 512);
-    tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
-    ret = ESPhttpUpdate.update(tlsClient, url);
-    if (ret != HTTP_UPDATE_FAILED) {
-      break;
-    }
-
-    lastErr = ESPhttpUpdate.getLastError();
-    lastErrText = ESPhttpUpdate.getLastErrorString();
-    if (lastErr != -5 || attempt >= 2) {
-      break;
-    }
-
-    Serial.println(F("WARNUNG OTA: Verbindung verloren, erneuter Versuch..."));
-    WiFi.reconnect();
-    delay(400);
-    yield();
-  }
-
-  if (ret == HTTP_UPDATE_FAILED) {
+  if (!otaOk) {
     WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
     leaveOtaLowRamMode(true);
-    Serial.printf("FEHLER OTA: [%d] %s\n",
-      lastErr,
-      lastErrText.c_str());
-  } else if (ret == HTTP_UPDATE_NO_UPDATES) {
-    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
-    leaveOtaLowRamMode(true);
-    Serial.println(F("INFO: OTA: Keine neue Firmware verfuegbar."));
+    Serial.printf("FEHLER OTA: %s\n", otaError.c_str());
+    return;
   }
+
+  Serial.println(F("OK OTA: Firmware erfolgreich geladen, Neustart..."));
+  delay(120);
+  ESP.restart();
 }
 
 void handleApiOtaUpload() {
