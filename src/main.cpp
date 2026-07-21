@@ -1475,9 +1475,22 @@ void handleApiOtaFlash() {
   delay(300);
 
   otaBusy = true;
+  streamEnabled = false;
   stopMdnsIfRunning();
 
+  // Free heap for TLS/HTTP updater by disabling AP while OTA is running.
+  const WiFiMode_t modeBeforeOta = WiFi.getMode();
+  const bool apWasActive = (modeBeforeOta == WIFI_AP || modeBeforeOta == WIFI_AP_STA);
+  if (apWasActive) {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+    delay(50);
+    yield();
+    Serial.println(F("INFO: AP fuer OTA temporar deaktiviert (mehr Heap)."));
+  }
+
   WiFiClientSecure tlsClient;
+  tlsClient.setBufferSizes(512, 512);
   tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
@@ -1487,6 +1500,9 @@ void handleApiOtaFlash() {
 
   if (ret == HTTP_UPDATE_FAILED) {
     otaBusy = false;
+    if (apWasActive) {
+      ensureFallbackAccessPoint();
+    }
     Serial.printf("FEHLER OTA: [%d] %s\n",
       ESPhttpUpdate.getLastError(),
       ESPhttpUpdate.getLastErrorString().c_str());
