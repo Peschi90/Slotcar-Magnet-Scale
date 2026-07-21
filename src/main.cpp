@@ -1518,7 +1518,6 @@ void handleApiOtaFlash() {
   const bool apWasActive = (modeBeforeOta == WIFI_AP || modeBeforeOta == WIFI_AP_STA);
   if (apWasActive) {
     WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_STA);
     delay(50);
     yield();
     Serial.println(F("INFO: AP fuer OTA temporar deaktiviert (mehr Heap)."));
@@ -1527,21 +1526,43 @@ void handleApiOtaFlash() {
   WiFiClientSecure tlsClient;
   tlsClient.setBufferSizes(512, 512);
   tlsClient.setInsecure();  // GitHub-Zertifikat nicht pruefen (ESP8266 hat kein CA-Buendel)
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   ESPhttpUpdate.rebootOnUpdate(true);
 
-  const t_httpUpdate_return ret = ESPhttpUpdate.update(tlsClient, url);
+  int lastErr = 0;
+  String lastErrText;
+  t_httpUpdate_return ret = HTTP_UPDATE_FAILED;
+  for (uint8_t attempt = 1; attempt <= 2; ++attempt) {
+    ret = ESPhttpUpdate.update(tlsClient, url);
+    if (ret != HTTP_UPDATE_FAILED) {
+      break;
+    }
+
+    lastErr = ESPhttpUpdate.getLastError();
+    lastErrText = ESPhttpUpdate.getLastErrorString();
+    if (lastErr != -5 || attempt >= 2) {
+      break;
+    }
+
+    Serial.println(F("WARNUNG OTA: Verbindung verloren, erneuter Versuch..."));
+    WiFi.reconnect();
+    delay(400);
+    yield();
+  }
 
   if (ret == HTTP_UPDATE_FAILED) {
+    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
     leaveOtaLowRamMode(true);
     if (apWasActive) {
       ensureFallbackAccessPoint();
     }
     Serial.printf("FEHLER OTA: [%d] %s\n",
-      ESPhttpUpdate.getLastError(),
-      ESPhttpUpdate.getLastErrorString().c_str());
+      lastErr,
+      lastErrText.c_str());
   } else if (ret == HTTP_UPDATE_NO_UPDATES) {
+    WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
     leaveOtaLowRamMode(true);
     if (apWasActive) {
       ensureFallbackAccessPoint();
